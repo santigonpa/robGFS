@@ -9,6 +9,13 @@ import math
 import random
 import time
 
+# Función auxiliar para mantener los ángulos entre -pi y pi
+def normalize_angle(angle):
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
 
 class PatrolNode(Node):
 
@@ -37,9 +44,10 @@ class PatrolNode(Node):
         # ---- Patrol goals ----
         self.home = (0.0, 0.0)
         self.goals = []
+        # Generar puntos aleatorios (ajustado para que no estén demasiado lejos)
         for _ in range(4):
-            gx = random.uniform(-3.0, 3.0)
-            gy = random.uniform(-3.0, 3.0)
+            gx = random.uniform(-2.5, 2.5)
+            gy = random.uniform(-2.5, 2.5)
             self.goals.append((gx, gy))
 
         self.goals.append(self.home)
@@ -71,44 +79,58 @@ class PatrolNode(Node):
         return math.hypot(gx - self.x, gy - self.y)
 
     def angle_to_goal(self, gx, gy):
-        return math.atan2(gy - self.y, gx - self.x) - self.yaw
+        target_angle = math.atan2(gy - self.y, gx - self.x)
+        # IMPORTANTE: Normalizar la diferencia de ángulo
+        return normalize_angle(target_angle - self.yaw)
 
-    def obstacle_ahead(self, threshold=0.5):
+    def obstacle_ahead(self, threshold=0.6): # Subí un poco el umbral por seguridad
         if not self.ranges:
             return False
 
-        front = self.ranges[len(self.ranges)//3 : 2*len(self.ranges)//3]
-        return min(front) < threshold
+        # Asumiendo configuración estándar (-pi a pi), el frente está en el medio.
+        # Tomamos el tercio central.
+        idx_start = len(self.ranges) // 3
+        idx_end = 2 * len(self.ranges) // 3
+        front = self.ranges[idx_start : idx_end]
+
+        # FILTRO CRÍTICO: Ignorar 0.0 (error/cerca) e inf (lejos)
+        # Si el valor es muy pequeño (<0.05), suele ser error de lectura o el propio chasis
+        valid_points = [r for r in front if r > 0.05 and not math.isinf(r)]
+
+        if not valid_points:
+            return False
+
+        return min(valid_points) < threshold
 
     # ---------------- MAIN LOOP ----------------
 
     def control_loop(self):
         msg = Twist()
 
-        # If patrol finished
+        # Si ya terminó la patrulla
         if self.current_goal >= len(self.goals):
             msg.linear.x = 0.0
             msg.angular.z = 0.0
             self.cmd_pub.publish(msg)
-
-            total_time = time.time() - self.start_time
-            self.get_logger().info(
-                f'Patrol finished | Time: {total_time:.2f}s | Obstacles: {self.obstacle_count}'
-            )
+            # Solo loguear una vez o detener el timer para no saturar la terminal
+            # self.timer.cancel() 
             return
 
         gx, gy = self.goals[self.current_goal]
 
-        # ----- REACTIVE LAYER -----
+        # ----- REACTIVE LAYER (Evasión) -----
         if self.obstacle_ahead():
+            self.get_logger().info('Obstaculo detectado, girando...')
             msg.linear.x = 0.0
-            msg.angular.z = 0.6
+            # Girar en sentido antihorario
+            msg.angular.z = 0.5
             self.obstacle_count += 1
 
-        # ----- DELIBERATIVE LAYER -----
+        # ----- DELIBERATIVE LAYER (Navegación) -----
         else:
             dist = self.distance_to_goal(gx, gy)
 
+            # Tolerancia para llegar al punto
             if dist < 0.3:
                 self.get_logger().info(
                     f'Reached goal {self.current_goal + 1}/{len(self.goals)}'
@@ -116,17 +138,35 @@ class PatrolNode(Node):
                 self.current_goal += 1
                 return
 
-            angle = self.angle_to_goal(gx, gy)
-            msg.linear.x = 0.3
-            msg.angular.z = angle
+            angle_error = self.angle_to_goal(gx, gy)
+
+            # CONTROLADOR PROPORCIONAL SIMPLE
+            # Si el error angular es grande, gira rápido in-situ.
+            # Si es pequeño, avanza y corrige suavemente.
+
+            if abs(angle_error) > 0.5: # Si el objetivo está a más de ~30 grados
+                msg.linear.x = 0.0     # Detenerse para girar (evita círculos grandes)
+                msg.angular.z = 0.5 if angle_error > 0 else -0.5
+            else:
+                msg.linear.x = 0.3
+                # Ganancia P (2.0) para corregir el ángulo proporcionalmente
+                msg.angular.z = angle_error * 2.0 
+
+                # Limitar la velocidad angular máxima para estabilidad
+                msg.angular.z = max(min(msg.angular.z, 1.0), -1.0)
 
         self.cmd_pub.publish(msg)
-
 
 def main():
     rclpy.init()
     node = PatrolNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
+if __name__ == '__main__':
+    main()
