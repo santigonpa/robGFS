@@ -53,7 +53,7 @@ def spawn_cone(name, x, y):
         '-file', sdf_path,
         '-x', str(x),
         '-y', str(y),
-        '-z', '0.35'  # mitad de la altura del cono
+        '-z', '0.35'  
     ])
 
     os.remove(sdf_path)
