@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseArray
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 
@@ -9,28 +9,47 @@ import math
 import random
 import time
 
-# Función auxiliar para mantener los ángulos entre -pi y pi
+
 def normalize_angle(angle):
+    """Normalize angle to [-pi, pi]."""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
         angle += 2.0 * math.pi
     return angle
 
+
 class PatrolNode(Node):
 
     def __init__(self):
-        super().__init__('patrol_node')
+        super().__init__("patrol_node")
+
+        # ---- Parameters ----
+        self.declare_parameter("use_random_goals", True)
+        self.declare_parameter("num_random_goals", 4)
+        self.declare_parameter("goal_tolerance", 0.3)
+        self.declare_parameter("obstacle_threshold", 0.6)
+
+        self.use_random_goals = self.get_parameter("use_random_goals").value
+        self.num_random_goals = self.get_parameter("num_random_goals").value
+        self.goal_tolerance = self.get_parameter("goal_tolerance").value
+        self.obstacle_threshold = self.get_parameter("obstacle_threshold").value
 
         # ---- Publisher ----
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
         # ---- Subscribers ----
         self.scan_sub = self.create_subscription(
-            LaserScan, '/scan', self.scan_callback, 10)
+            LaserScan, "/scan", self.scan_callback, 10
+        )
 
         self.odom_sub = self.create_subscription(
-            Odometry, '/odom', self.odom_callback, 10)
+            Odometry, "/odom", self.odom_callback, 10
+        )
+
+        self.waypoint_sub = self.create_subscription(
+            PoseArray, "/patrol_waypoints", self.waypoint_callback, 10
+        )
 
         # ---- Timer ----
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -44,22 +63,58 @@ class PatrolNode(Node):
         # ---- Patrol goals ----
         self.home = (0.0, 0.0)
         self.goals = []
-        # Generar puntos aleatorios (ajustado para que no estén demasiado lejos)
-        for _ in range(4):
-            gx = random.uniform(-2.5, 2.5)
-            gy = random.uniform(-2.5, 2.5)
-            self.goals.append((gx, gy))
-
-        self.goals.append(self.home)
         self.current_goal = 0
+        self.goals_received = False
+
+        # Generate random goals if configured (fallback)
+        if self.use_random_goals:
+            self._generate_random_goals()
 
         # ---- Metrics ----
         self.start_time = time.time()
         self.obstacle_count = 0
+        self.patrol_complete = False
 
-        self.get_logger().info('Patrol node started')
+        self.get_logger().info("Patrol node started")
+        if self.use_random_goals:
+            self.get_logger().info(
+                "Using random goals (will switch to /patrol_waypoints if received)"
+            )
+        else:
+            self.get_logger().info(
+                "Waiting for waypoints on /patrol_waypoints topic..."
+            )
+
+    def _generate_random_goals(self):
+        """Generate random patrol goals as fallback."""
+        self.goals = []
+        for _ in range(self.num_random_goals):
+            gx = random.uniform(-2.5, 2.5)
+            gy = random.uniform(-2.5, 2.5)
+            self.goals.append((gx, gy))
+        self.goals.append(self.home)
+        self.get_logger().info(f"Generated {len(self.goals)} random goals")
 
     # ---------------- CALLBACKS ----------------
+
+    def waypoint_callback(self, msg: PoseArray):
+        """Receive waypoints from external generator."""
+        if self.goals_received:
+            return  # Only accept waypoints once
+
+        self.goals = []
+        for pose in msg.poses:
+            self.goals.append((pose.position.x, pose.position.y))
+
+        if self.goals:
+            self.goals_received = True
+            self.current_goal = 0
+            self.start_time = time.time()
+            self.get_logger().info(
+                f"Received {len(self.goals)} waypoints from /patrol_waypoints"
+            )
+            for i, (x, y) in enumerate(self.goals):
+                self.get_logger().info(f"  Goal {i+1}: ({x:.2f}, {y:.2f})")
 
     def scan_callback(self, msg):
         self.ranges = msg.ranges
@@ -80,21 +135,19 @@ class PatrolNode(Node):
 
     def angle_to_goal(self, gx, gy):
         target_angle = math.atan2(gy - self.y, gx - self.x)
-        # IMPORTANTE: Normalizar la diferencia de ángulo
         return normalize_angle(target_angle - self.yaw)
 
-    def obstacle_ahead(self, threshold=0.6): # Subí un poco el umbral por seguridad
+    def obstacle_ahead(self, threshold=None):
+        if threshold is None:
+            threshold = self.obstacle_threshold
+
         if not self.ranges:
             return False
 
-        # Asumiendo configuración estándar (-pi a pi), el frente está en el medio.
-        # Tomamos el tercio central.
         idx_start = len(self.ranges) // 3
         idx_end = 2 * len(self.ranges) // 3
-        front = self.ranges[idx_start : idx_end]
+        front = self.ranges[idx_start:idx_end]
 
-        # FILTRO CRÍTICO: Ignorar 0.0 (error/cerca) e inf (lejos)
-        # Si el valor es muy pequeño (<0.05), suele ser error de lectura o el propio chasis
         valid_points = [r for r in front if r > 0.05 and not math.isinf(r)]
 
         if not valid_points:
@@ -107,55 +160,62 @@ class PatrolNode(Node):
     def control_loop(self):
         msg = Twist()
 
-        # Si ya terminó la patrulla
-        if self.current_goal >= len(self.goals):
+        # Wait for goals
+        if not self.goals:
             msg.linear.x = 0.0
             msg.angular.z = 0.0
             self.cmd_pub.publish(msg)
-            # Solo loguear una vez o detener el timer para no saturar la terminal
-            # self.timer.cancel() 
+            return
+
+        # Check if patrol is complete
+        if self.current_goal >= len(self.goals):
+            if not self.patrol_complete:
+                self.patrol_complete = True
+                elapsed = time.time() - self.start_time
+                self.get_logger().info("=" * 50)
+                self.get_logger().info("PATROL COMPLETE!")
+                self.get_logger().info(f"Total time: {elapsed:.2f} seconds")
+                self.get_logger().info(f"Obstacles avoided: {self.obstacle_count}")
+                self.get_logger().info("=" * 50)
+
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            self.cmd_pub.publish(msg)
             return
 
         gx, gy = self.goals[self.current_goal]
 
-        # ----- REACTIVE LAYER (Evasión) -----
+        # ----- REACTIVE LAYER (Obstacle Avoidance) -----
         if self.obstacle_ahead():
-            self.get_logger().info('Obstaculo detectado, girando...')
+            self.get_logger().info("Obstacle detected, turning...")
             msg.linear.x = 0.0
-            # Girar en sentido antihorario
             msg.angular.z = 0.5
             self.obstacle_count += 1
 
-        # ----- DELIBERATIVE LAYER (Navegación) -----
+        # ----- DELIBERATIVE LAYER (Navigation) -----
         else:
             dist = self.distance_to_goal(gx, gy)
 
-            # Tolerancia para llegar al punto
-            if dist < 0.3:
+            if dist < self.goal_tolerance:
                 self.get_logger().info(
-                    f'Reached goal {self.current_goal + 1}/{len(self.goals)}'
+                    f"Reached goal {self.current_goal + 1}/{len(self.goals)} "
+                    f"at ({gx:.2f}, {gy:.2f})"
                 )
                 self.current_goal += 1
                 return
 
             angle_error = self.angle_to_goal(gx, gy)
 
-            # CONTROLADOR PROPORCIONAL SIMPLE
-            # Si el error angular es grande, gira rápido in-situ.
-            # Si es pequeño, avanza y corrige suavemente.
-
-            if abs(angle_error) > 0.5: # Si el objetivo está a más de ~30 grados
-                msg.linear.x = 0.0     # Detenerse para girar (evita círculos grandes)
+            if abs(angle_error) > 0.5:
+                msg.linear.x = 0.0
                 msg.angular.z = 0.5 if angle_error > 0 else -0.5
             else:
                 msg.linear.x = 0.3
-                # Ganancia P (2.0) para corregir el ángulo proporcionalmente
-                msg.angular.z = angle_error * 2.0 
-
-                # Limitar la velocidad angular máxima para estabilidad
+                msg.angular.z = angle_error * 2.0
                 msg.angular.z = max(min(msg.angular.z, 1.0), -1.0)
 
         self.cmd_pub.publish(msg)
+
 
 def main():
     rclpy.init()
@@ -168,5 +228,6 @@ def main():
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
