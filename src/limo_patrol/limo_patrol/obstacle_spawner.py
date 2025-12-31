@@ -14,31 +14,33 @@ CONE_SDF = """
   <model name="{name}">
     <static>true</static>
     <link name="link">
+
       <collision name="collision">
         <geometry>
-          <cone>
+          <cylinder>
             <radius>0.25</radius>
             <length>0.7</length>
-          </cone>
+          </cylinder>
         </geometry>
       </collision>
+
       <visual name="visual">
         <geometry>
-          <cone>
+          <cylinder>
             <radius>0.25</radius>
             <length>0.7</length>
-          </cone>
+          </cylinder>
         </geometry>
         <material>
           <ambient>1 0.5 0 1</ambient>
           <diffuse>1 0.5 0 1</diffuse>
         </material>
       </visual>
+
     </link>
   </model>
 </sdf>
 """
-
 
 def spawn_cone(name, x, y):
     sdf_content = CONE_SDF.format(name=name)
@@ -47,14 +49,20 @@ def spawn_cone(name, x, y):
         f.write(sdf_content.encode('utf-8'))
         sdf_path = f.name
 
-    subprocess.run([
-        'ros2', 'run', 'gazebo_ros', 'spawn_entity.py',
-        '-entity', name,
-        '-file', sdf_path,
-        '-x', str(x),
-        '-y', str(y),
-        '-z', '0.35'  
-    ])
+    print(f"[Spawner] Spawning {name} at x={x:.2f}, y={y:.2f}, z=0.35")
+    result = subprocess.run([
+      'ros2', 'run', 'gazebo_ros', 'spawn_entity.py',
+      '-entity', name,
+      '-file', sdf_path,
+      '-x', str(x),
+      '-y', str(y),
+      '-z', '0.35'
+    ], capture_output=True, text=True)
+
+    if result.returncode != 0:
+      print(f"[Spawner][ERROR] spawn_entity failed for {name}:", result.stderr)
+    else:
+      print(f"[Spawner] spawn_entity succeeded for {name}")
 
     os.remove(sdf_path)
 
