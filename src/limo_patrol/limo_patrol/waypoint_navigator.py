@@ -64,7 +64,18 @@ class WaypointNavigator(Node):
         self.state = "WAITING"  # WAITING, NAVIGATING, AVOIDING, DONE
         self.avoid_direction = 1  # 1 = left, -1 = right
         self.avoid_start_time = 0.0
+        self.avoid_phase = "REVERSE"  # REVERSE, TURN, FOLLOW_WALL
         self.last_log_time = 0.0
+
+        # Avoidance timing parameters
+        self.reverse_duration = 1.0  # seconds to reverse
+        self.turn_duration = 1.5     # seconds to turn away
+        self.follow_wall_timeout = 30.0  # max seconds following wall (increased)
+
+        # Blocked positions to avoid loops
+        self.blocked_positions = []  # List of (x, y) positions where obstacles were found
+        self.blocked_radius = 0.6    # Radius around blocked position to avoid
+        self.max_blocked_positions = 20  # Max positions to remember
 
         self.get_logger().info(
             "Waypoint Navigator started - waiting for waypoints on /patrol_waypoints"
@@ -138,9 +149,9 @@ class WaypointNavigator(Node):
         return r
 
     def check_front(self):
-        """Check if obstacle ahead. Returns (blocked, left_clear, right_clear)."""
+        """Check if obstacle ahead. Returns (blocked, left_clear, right_clear, left_dist, right_dist)."""
         if not self.scan_ranges:
-            return False, True, True
+            return False, True, True, float("inf"), float("inf")
 
         n = len(self.scan_ranges)
 
@@ -175,7 +186,81 @@ class WaypointNavigator(Node):
         left_clear = left_min > self.obstacle_distance
         right_clear = right_min > self.obstacle_distance
 
-        return blocked, left_clear, right_clear
+        return blocked, left_clear, right_clear, left_min, right_min
+
+    def check_path_to_goal(self, gx, gy):
+        """Check if the direct path to goal is clear (no obstacle in that direction)."""
+        if not self.scan_ranges:
+            return True
+
+        angle_to_goal = self.angle_to(gx, gy)
+        
+        # Get scan reading in the direction of the goal
+        # Convert from robot-relative angle to scan index
+        scan_angle = angle_to_goal  # Already relative to robot heading
+        
+        # Check a cone of ±15 degrees around the goal direction
+        cone_half = math.radians(15)
+        
+        for offset in [0, -cone_half/2, cone_half/2, -cone_half, cone_half]:
+            dist = self.get_scan_at_angle(scan_angle + offset)
+            goal_dist = self.distance_to(gx, gy)
+            # If obstacle is closer than the goal and within obstacle_distance, path is blocked
+            if dist < min(goal_dist, self.obstacle_distance * 1.5):
+                return False
+        
+        return True
+
+    def add_blocked_position(self, x, y):
+        """Add a position to the blocked list to avoid loops."""
+        # Check if already blocked nearby
+        for bx, by in self.blocked_positions:
+            if math.hypot(x - bx, y - by) < self.blocked_radius:
+                return  # Already blocked nearby
+        
+        self.blocked_positions.append((x, y))
+        self.get_logger().info(f"Blocked position added: ({x:.2f}, {y:.2f})")
+        
+        # Limit the number of blocked positions
+        if len(self.blocked_positions) > self.max_blocked_positions:
+            self.blocked_positions.pop(0)
+
+    def is_position_blocked(self, x, y):
+        """Check if a position is near a blocked area."""
+        for bx, by in self.blocked_positions:
+            if math.hypot(x - bx, y - by) < self.blocked_radius:
+                return True
+        return False
+
+    def get_direction_away_from_blocked(self):
+        """Get the best direction to turn away from blocked positions."""
+        if not self.blocked_positions:
+            return 0
+        
+        # Find the nearest blocked position
+        min_dist = float("inf")
+        nearest_blocked = None
+        for bx, by in self.blocked_positions:
+            d = math.hypot(self.x - bx, self.y - by)
+            if d < min_dist:
+                min_dist = d
+                nearest_blocked = (bx, by)
+        
+        if nearest_blocked is None:
+            return 0
+        
+        # Calculate angle to blocked position
+        angle_to_blocked = math.atan2(nearest_blocked[1] - self.y, nearest_blocked[0] - self.x)
+        angle_diff = self.normalize_angle(angle_to_blocked - self.yaw)
+        
+        # Return direction away from blocked (opposite side)
+        return -1 if angle_diff > 0 else 1
+
+    def clear_blocked_for_waypoint(self):
+        """Clear blocked positions when reaching a new waypoint."""
+        if self.blocked_positions:
+            self.get_logger().info(f"Clearing {len(self.blocked_positions)} blocked positions")
+            self.blocked_positions.clear()
 
     def stop(self):
         """Stop the robot."""
@@ -235,56 +320,139 @@ class WaypointNavigator(Node):
             )
             self.current_waypoint_idx += 1
             self.state = "NAVIGATING"
+            self.clear_blocked_for_waypoint()  # Clear blocked positions for new waypoint
             self.stop()
             return
 
         # Check obstacles
-        blocked, left_clear, right_clear = self.check_front()
+        blocked, left_clear, right_clear, left_dist, right_dist = self.check_front()
 
         # === AVOIDING STATE ===
         if self.state == "AVOIDING":
             elapsed = time.time() - self.avoid_start_time
 
-            # If front is clear, go back to navigating
-            if not blocked:
+            # Check if path to goal is now clear - if so, resume navigation
+            # But also check we're not heading back into a blocked area
+            if not blocked and self.check_path_to_goal(gx, gy):
+                # Check if the path forward would lead us into a blocked area
+                forward_x = self.x + math.cos(self.yaw) * 0.5
+                forward_y = self.y + math.sin(self.yaw) * 0.5
+                if not self.is_position_blocked(forward_x, forward_y):
+                    self.state = "NAVIGATING"
+                    self.get_logger().info("Path to goal is clear - resuming navigation")
+                    return
+
+            # Timeout protection - skip waypoint if stuck too long
+            if elapsed > self.follow_wall_timeout:
+                self.get_logger().warn(
+                    f"Avoidance timeout! Skipping waypoint {self.current_waypoint_idx + 1}"
+                )
+                self.current_waypoint_idx += 1
                 self.state = "NAVIGATING"
-                self.get_logger().info("Path clear - resuming navigation")
                 return
 
-            # Turn in chosen direction
-            msg.linear.x = 0.0
-            msg.angular.z = self.angular_speed * self.avoid_direction
+            # Phase 1: REVERSE - back up to create space
+            if self.avoid_phase == "REVERSE":
+                if elapsed < self.reverse_duration:
+                    msg.linear.x = -0.15
+                    msg.angular.z = 0.0
+                    self.cmd_pub.publish(msg)
+                    return
+                else:
+                    self.avoid_phase = "TURN"
+                    self.get_logger().info(f"Reverse done, now turning")
 
-            # If stuck for too long, try reverse
-            if elapsed > 5.0:
-                msg.linear.x = -0.1
-                msg.angular.z = self.angular_speed * self.avoid_direction
+            # Phase 2: TURN - rotate away from obstacle
+            if self.avoid_phase == "TURN":
+                turn_elapsed = elapsed - self.reverse_duration
+                if turn_elapsed < self.turn_duration:
+                    msg.linear.x = 0.0
+                    msg.angular.z = self.angular_speed * self.avoid_direction
+                    self.cmd_pub.publish(msg)
+                    return
+                else:
+                    self.avoid_phase = "FOLLOW_WALL"
+                    self.get_logger().info("Turn done, now following wall to go around")
 
-            self.cmd_pub.publish(msg)
-            self.log_status()
-            return
+            # Phase 3: FOLLOW_WALL - move forward while keeping obstacle on one side
+            if self.avoid_phase == "FOLLOW_WALL":
+                # Desired distance to keep from wall/obstacle on the side
+                desired_side_dist = self.obstacle_distance * 1.5
+
+                # Get the distance on the side where the obstacle was
+                if self.avoid_direction == 1:  # We turned left, obstacle is on right
+                    side_dist = right_dist
+                else:  # We turned right, obstacle is on left
+                    side_dist = left_dist
+
+                # If front is blocked, turn more
+                if blocked:
+                    msg.linear.x = 0.05
+                    msg.angular.z = self.angular_speed * self.avoid_direction * 0.8
+                else:
+                    # Move forward with wall-following correction
+                    msg.linear.x = self.linear_speed * 0.7
+
+                    # Adjust angular velocity to maintain distance from wall
+                    if side_dist < desired_side_dist:
+                        # Too close to wall, turn away
+                        msg.angular.z = self.angular_speed * self.avoid_direction * 0.5
+                    elif side_dist > desired_side_dist * 2:
+                        # Lost the wall, turn back towards it slightly
+                        msg.angular.z = -self.angular_speed * self.avoid_direction * 0.3
+                    else:
+                        # Good distance, go straight
+                        msg.angular.z = 0.0
+
+                self.cmd_pub.publish(msg)
+                self.log_status()
+                return
 
         # === NAVIGATING STATE ===
         if self.state == "NAVIGATING":
+            # Check if current position is near a blocked area
+            if self.is_position_blocked(self.x, self.y):
+                # We're in a blocked area, need to move away
+                away_dir = self.get_direction_away_from_blocked()
+                msg.linear.x = 0.1
+                msg.angular.z = self.angular_speed * away_dir if away_dir != 0 else self.angular_speed
+                self.cmd_pub.publish(msg)
+                self.get_logger().info("Moving away from blocked area...")
+                return
+
             # Obstacle detected - switch to avoiding
             if blocked:
                 self.state = "AVOIDING"
                 self.avoid_start_time = time.time()
+                self.avoid_phase = "REVERSE"
 
-                # Choose direction: prefer the clearer side
+                # Block the current position to avoid returning here
+                self.add_blocked_position(self.x, self.y)
+
+                # Choose direction: prefer the clearer side, but also consider blocked positions
+                away_from_blocked = self.get_direction_away_from_blocked()
+                
                 if left_clear and not right_clear:
                     self.avoid_direction = 1  # Turn left
                 elif right_clear and not left_clear:
                     self.avoid_direction = -1  # Turn right
                 elif left_clear and right_clear:
-                    # Both clear, turn towards goal
-                    self.avoid_direction = 1 if angle_error > 0 else -1
+                    # Both clear - prefer direction away from blocked areas, or towards goal
+                    if away_from_blocked != 0:
+                        self.avoid_direction = away_from_blocked
+                    else:
+                        self.avoid_direction = 1 if angle_error > 0 else -1
                 else:
-                    # Neither clear, just pick one
-                    self.avoid_direction = 1
+                    # Neither clear, choose side with more space or away from blocked
+                    if away_from_blocked != 0:
+                        self.avoid_direction = away_from_blocked
+                    else:
+                        self.avoid_direction = 1 if left_dist > right_dist else -1
 
                 direction_name = "LEFT" if self.avoid_direction == 1 else "RIGHT"
-                self.get_logger().info(f"Obstacle detected! Turning {direction_name}")
+                self.get_logger().info(
+                    f"Obstacle detected! Starting avoidance maneuver: {direction_name}"
+                )
                 return
 
             # No obstacle - navigate to goal

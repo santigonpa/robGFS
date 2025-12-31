@@ -21,10 +21,10 @@ def generate_launch_description():
         parameters=[
             {
                 "num_waypoints": LaunchConfiguration("num_waypoints"),
-                "x_min": -2.0,
-                "x_max": 2.0,
-                "y_min": -2.0,
-                "y_max": 2.0,
+                "x_min": -9.0,
+                "x_max": 9.0,
+                "y_min": -9.0,
+                "y_max": 9.0,
                 "safe_radius": 0.5,
                 "include_home": True,
             }

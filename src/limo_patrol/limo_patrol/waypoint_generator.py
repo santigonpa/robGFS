@@ -8,10 +8,10 @@ import os
 import math
 
 
-X_MIN, X_MAX = -4.0, 4.0
-Y_MIN, Y_MAX = -4.0, 4.0
+X_MIN, X_MAX = -9.5, 9.5
+Y_MIN, Y_MAX = -9.5, 9.5
 ROBOT_SAFE_RADIUS = 0.5  # Avoid spawning too close to origin
-OBSTACLE_CLEARANCE = 1.0  # Minimum distance between obstacles and waypoints
+OBSTACLE_CLEARANCE = 0.5  # Minimum distance between obstacles and waypoints
 
 
 BOX_SDF = """
@@ -133,9 +133,9 @@ class WaypointGenerator(Node):
             self.spawn_waypoint_markers()
 
         # Spawn obstacles that don't overlap with waypoints
-        if self.spawn_obstacles:
-            self.obstacles = self.generate_and_spawn_obstacles()
-            self.get_logger().info(f"Spawned {len(self.obstacles)} obstacles")
+        # if self.spawn_obstacles:
+        #     self.obstacles = self.generate_and_spawn_obstacles()
+        #     self.get_logger().info(f"Spawned {len(self.obstacles)} obstacles")
 
         # Timer to publish waypoints periodically
         self.timer = self.create_timer(1.0, self.publish_waypoints)
