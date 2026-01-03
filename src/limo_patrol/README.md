@@ -4,18 +4,30 @@ A ROS2 Humble package for autonomous patrol with obstacle avoidance for the Limo
 
 ## Overview
 
-This package provides:
+This package provides two navigation strategies:
+
+### Strategy 1: State Machine Navigator (`waypoint_navigator`)
+- Uses a state machine (WAITING → NAVIGATING → AVOIDING → DONE)
+- Reactive obstacle avoidance with wall-following behavior
+- Good for structured environments
+
+### Strategy 2: Potential Field Navigator (`potential_field_navigator`)
+- Uses Artificial Potential Fields (APF)
+- Attractive force towards waypoints + Repulsive force from obstacles
+- Smoother trajectories, better for open environments
+
+**Other nodes:**
 - **Waypoint Generator**: Generates random patrol waypoints
-- **Waypoint Navigator**: Navigates through waypoints with obstacle avoidance and re-routing
-- **Patrol Node**: Legacy patrol node
 - **Obstacle Spawner**: Spawns random obstacles in Gazebo simulation
 
 ## Architecture
 
 ```
-┌─────────────────────┐     /patrol_waypoints     ┌─────────────────────┐
-│ waypoint_generator  │ ──────────────────────────▶│  waypoint_navigator │
-└─────────────────────┘      (PoseArray)          └─────────────────────┘
+┌─────────────────────┐     /patrol_waypoints     ┌─────────────────────────────┐
+│ waypoint_generator  │ ──────────────────────────▶│  waypoint_navigator         │
+└─────────────────────┘      (PoseArray)          │  - OR -                     │
+                                                  │  potential_field_navigator  │
+                                                  └─────────────────────────────┘
                                                            │
                                                            │ /cmd_vel
                                                            ▼
@@ -23,7 +35,7 @@ This package provides:
                                                     │  Limo Robot │
                                                     └─────────────┘
                                                            │
-                              /scan, /odom                 │
+                              /scan, /odometry             │
                         ◀──────────────────────────────────┘
 ```
 
@@ -44,16 +56,16 @@ Make sure Gazebo simulation is running with the Limo robot:
 
 ```bash
 # Terminal 1: Launch Gazebo with Limo
-ros2 launch limo_car ackermann_gazebo.launch.py
+ros2 launch limo_description gazebo_models_diff.launch.py
 ```
 
 ---
 
 ## Running Nodes
 
-### Option 1: Navigate Waypoints (Recommended)
+### Option 1: State Machine Navigator (Recommended for cluttered environments)
 
-Runs waypoint generator + navigator with obstacle avoidance:
+Runs waypoint generator + navigator with reactive obstacle avoidance:
 
 ```bash
 ros2 launch limo_patrol navigate_waypoints.launch.py
@@ -64,7 +76,20 @@ With custom number of waypoints:
 ros2 launch limo_patrol navigate_waypoints.launch.py num_waypoints:=6
 ```
 
-### Option 2: Simple Patrol (Legacy)
+### Option 2: Potential Field Navigator (Recommended for open environments)
+
+Runs waypoint generator + potential field navigator with smooth trajectories:
+
+```bash
+ros2 launch limo_patrol navigate_pf.launch.py
+```
+
+With custom number of waypoints:
+```bash
+ros2 launch limo_patrol navigate_pf.launch.py num_waypoints:=6
+```
+
+### Option 3: Simple Patrol (Legacy)
 
 ```bash
 ros2 launch limo_patrol patrol.launch.py
@@ -108,6 +133,25 @@ ros2 run limo_patrol waypoint_navigator --ros-args \
     -p angular_speed:=0.4
 ```
 
+### Potential Field Navigator
+
+Navigates using artificial potential fields:
+
+```bash
+ros2 run limo_patrol potential_field_navigator
+```
+
+With parameters:
+```bash
+ros2 run limo_patrol potential_field_navigator --ros-args \
+    -p ka:=1.5 \
+    -p kr:=0.3 \
+    -p obs_radius:=0.8 \
+    -p goal_tolerance:=0.3 \
+    -p max_linear_speed:=0.35 \
+    -p max_angular_speed:=1.0
+```
+
 ### Obstacle Spawner
 
 Spawns random obstacles in Gazebo:
@@ -131,9 +175,9 @@ ros2 run limo_patrol obstacle_spawner
 
 | Topic | Type | Node | Description |
 |-------|------|------|-------------|
-| `/patrol_waypoints` | `geometry_msgs/PoseArray` | waypoint_navigator | Waypoints to visit |
-| `/scan` | `sensor_msgs/LaserScan` | waypoint_navigator | Laser scan for obstacles |
-| `/odom` | `nav_msgs/Odometry` | waypoint_navigator | Robot odometry |
+| `/patrol_waypoints` | `geometry_msgs/PoseArray` | waypoint_navigator, potential_field_navigator | Waypoints to visit |
+| `/scan` | `sensor_msgs/LaserScan` | waypoint_navigator, potential_field_navigator | Laser scan for obstacles |
+| `/odometry` | `nav_msgs/Odometry` | waypoint_navigator, potential_field_navigator | Robot odometry |
 
 ---
 
@@ -160,11 +204,22 @@ ros2 run limo_patrol obstacle_spawner
 | `linear_speed` | float | 0.2 | Forward speed (m/s) |
 | `angular_speed` | float | 0.4 | Turning speed (rad/s) |
 
+### Potential Field Navigator
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ka` | float | 1.2 | Attractive force gain (towards goal) |
+| `kr` | float | 0.4 | Repulsive force gain (from obstacles) |
+| `obs_radius` | float | 1.0 | Obstacle influence radius (meters) |
+| `goal_tolerance` | float | 0.3 | Distance to consider goal reached |
+| `max_linear_speed` | float | 0.35 | Maximum forward speed (m/s) |
+| `max_angular_speed` | float | 1.0 | Maximum turning speed (rad/s) |
+
 ---
 
 ## Navigation States
 
-The `waypoint_navigator` uses a state machine:
+### Waypoint Navigator (State Machine)
 
 | State | Description |
 |-------|-------------|
@@ -172,6 +227,13 @@ The `waypoint_navigator` uses a state machine:
 | `NAVIGATING` | Moving towards current waypoint |
 | `AVOIDING` | Obstacle detected, turning to find clear path |
 | `DONE` | All waypoints reached |
+
+### Potential Field Navigator (APF)
+
+Uses continuous force calculations:
+- **Attractive Force**: Pulls robot towards waypoint (proportional to distance)
+- **Repulsive Force**: Pushes robot away from obstacles (inverse proportional to distance²)
+- **Resultant Force**: Sum of all forces determines velocity commands
 
 ---
 

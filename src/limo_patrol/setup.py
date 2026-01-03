@@ -30,6 +30,7 @@ setup(
             "obstacle_spawner = limo_patrol.obstacle_spawner:main",
             "waypoint_generator = limo_patrol.waypoint_generator:main",
             "waypoint_navigator = limo_patrol.waypoint_navigator:main",
+            "potential_field_navigator = limo_patrol.potential_field_navigator:main",
         ],
     },
 )

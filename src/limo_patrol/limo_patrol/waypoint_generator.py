@@ -140,30 +140,43 @@ class WaypointGenerator(Node):
         # Timer to publish waypoints periodically
         self.timer = self.create_timer(1.0, self.publish_waypoints)
 
+    # def generate_waypoints(self):
+    #     """Generate random waypoints avoiding the robot's starting position."""
+    #     waypoints = []
+    #     attempts = 0
+    #     max_attempts = 100
+
+    #     while len(waypoints) < self.num_waypoints and attempts < max_attempts:
+    #         x = random.uniform(self.x_min, self.x_max)
+    #         y = random.uniform(self.y_min, self.y_max)
+
+    #         # Avoid spawning too close to origin (robot start)
+    #         if (x**2 + y**2) ** 0.5 < self.safe_radius:
+    #             attempts += 1
+    #             continue
+
+    #         waypoints.append((x, y))
+    #         self.get_logger().info(f"Waypoint {len(waypoints)}: ({x:.2f}, {y:.2f})")
+
+    #     # Add home position at the end if configured
+    #     if self.include_home:
+    #         waypoints.append((0.0, 0.0))
+    #         self.get_logger().info("Added home position (0.0, 0.0) as final waypoint")
+
+    #     return waypoints
+
     def generate_waypoints(self):
-        """Generate random waypoints avoiding the robot's starting position."""
-        waypoints = []
-        attempts = 0
-        max_attempts = 100
-
-        while len(waypoints) < self.num_waypoints and attempts < max_attempts:
-            x = random.uniform(self.x_min, self.x_max)
-            y = random.uniform(self.y_min, self.y_max)
-
-            # Avoid spawning too close to origin (robot start)
-            if (x**2 + y**2) ** 0.5 < self.safe_radius:
-                attempts += 1
-                continue
-
-            waypoints.append((x, y))
-            self.get_logger().info(f"Waypoint {len(waypoints)}: ({x:.2f}, {y:.2f})")
-
-        # Add home position at the end if configured
-        if self.include_home:
-            waypoints.append((0.0, 0.0))
-            self.get_logger().info("Added home position (0.0, 0.0) as final waypoint")
-
-        return waypoints
+      """Return fixed waypoints instead of random ones."""
+      waypoints = [
+          (2.343100, -3.663920),
+          (4.182320, 1.741630),
+          (-3.546480, -3.917670),
+          (-2.485020, 4.259540),
+          (0.00, 0.00),  # Home position
+      ]
+      for i, (x, y) in enumerate(waypoints):
+          self.get_logger().info(f"Waypoint {i+1}: ({x:.2f}, {y:.2f})")
+      return waypoints
 
     def spawn_waypoint_markers(self):
         """Spawn colored markers at each waypoint for visualization."""
