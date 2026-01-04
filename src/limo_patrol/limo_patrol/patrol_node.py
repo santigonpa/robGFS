@@ -11,7 +11,7 @@ import time
 
 
 def normalize_angle(angle):
-    """Normalize angle to [-pi, pi]."""
+    """Normalizar el angulo a [-pi, pi]."""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
@@ -24,7 +24,7 @@ class PatrolNode(Node):
     def __init__(self):
         super().__init__("patrol_node")
 
-        # ---- Parameters ----
+        # ---- Parametros ----
         self.declare_parameter("use_random_goals", True)
         self.declare_parameter("num_random_goals", 4)
         self.declare_parameter("goal_tolerance", 0.3)
@@ -54,23 +54,23 @@ class PatrolNode(Node):
         # ---- Timer ----
         self.timer = self.create_timer(0.1, self.control_loop)
 
-        # ---- Robot state ----
+        # ---- Estado ----
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
         self.ranges = []
 
-        # ---- Patrol goals ----
+        # ---- Objetivos ----
         self.home = (0.0, 0.0)
         self.goals = []
         self.current_goal = 0
         self.goals_received = False
 
-        # Generate random goals if configured (fallback)
+        # Si se usan objetivos aleatorios, generarlos ahora
         if self.use_random_goals:
             self._generate_random_goals()
 
-        # ---- Metrics ----
+        # ---- Metricas ----
         self.start_time = time.time()
         self.obstacle_count = 0
         self.patrol_complete = False
@@ -86,7 +86,7 @@ class PatrolNode(Node):
             )
 
     def _generate_random_goals(self):
-        """Generate random patrol goals as fallback."""
+        """Generar objetivos aleatorios"""
         self.goals = []
         for _ in range(self.num_random_goals):
             gx = random.uniform(-2.5, 2.5)
@@ -98,9 +98,9 @@ class PatrolNode(Node):
     # ---------------- CALLBACKS ----------------
 
     def waypoint_callback(self, msg: PoseArray):
-        """Receive waypoints from external generator."""
+        """Recibir waypoints de un generador externo"""
         if self.goals_received:
-            return  # Only accept waypoints once
+            return
 
         self.goals = []
         for pose in msg.poses:
